@@ -6,16 +6,37 @@ Welcome to **Dashverse** — where we don't just use generative AI, we push it t
 
 We are a small, fast-moving team building powerful tools for the next generation of storytellers. Our products — like [Frameo.ai](https://frameo.ai/create) and [Dashtoon Studio](https://studio.dashtoon.ai/) — enable creators to instantly turn ideas into high-quality videos, comics, and more using AI. If you're someone who thrives on solving deep technical problems and wants to see your work used by millions, this is your playground.
 
-## The Role: Research Engineer
+## Open Roles
+
+We're hiring for multiple positions. Choose the problem statement that matches your expertise:
+
+### Research Engineer
 
 This isn't your average research role.
 
-At Dashverse, your work directly impacts creators. You’ll get to see the delight on a user's face when a tool you've built helps them bring their imagination to life — in seconds, not hours. This is a rare opportunity to move fast and shape the future of generative media.
+At Dashverse, your work directly impacts creators. You'll get to see the delight on a user's face when a tool you've built helps them bring their imagination to life — in seconds, not hours. This is a rare opportunity to move fast and shape the future of generative media.
 
 You're not here to write papers and wait six months for reviews. You're here to:
 - Prototype bleeding-edge generative models.
 - Ship tools that change how stories are made.
 - Build the infra and internal tools to move 10x faster.
+
+**Problem Statements:**
+- [Problem Statement 001: Who's That Character?](problem-statement-001-whos-that-character.md) - Build a scalable pipeline to extract structured metadata from character images
+- [Problem Statement 002: Make a Multimodal AI](problem-statement-002-make-a-multimodal-ai.md) - Generate stylized art and captions from a single seed
+
+### Product Engineer - Agents
+
+Build intelligent agent systems that orchestrate complex workflows.
+
+You'll design and implement multi-agent architectures that coordinate specialized AI agents to solve real-world problems. This role focuses on:
+- Designing agent orchestration systems with clean abstractions
+- Implementing parallel execution and distributed coordination
+- Building robust error handling and observability
+- Creating scalable architectures for agent collaboration
+
+**Problem Statement:**
+- [Problem Statement 003: Agent Orchestrator](problem-statement-003-agent-orchestrator.md) - Build a conversational agent chain with parallel execution
 
 ## What We're Solving
 
@@ -146,10 +167,10 @@ Bonus if you:
 ## How to Apply
 
 - Clone this repo.
-- Attempt one of the sample problems — or fork it and show us something better.
-- Email your submission or proposal to: **soumyadeep [at] dashtoon.com**
+- Complete the problem statement that matches your role (see above).
+- Email your submission to: **soumyadeep [at] dashverse.ai**
 
-No Leetcode. Just real problems and real builders.
+No Leetcode. No resume screening. Just real problems and real builders.
 
 If you're the kind of person who wants to own the full stack — from fine-tuning to infra to user-facing tools — come build with us.
 
