@@ -1,0 +1,46 @@
+{
+    "required_fields": ["destination", "date", "origin", "trip_type"],
+
+    "flights": {
+        "AirFrance": [
+            { "flight_no": "AF-101", "price": 450.00, "duration": "8h 30m" },
+            { "flight_no": "AF-202", "price": 510.00, "duration": "7h 50m" }
+        ],
+        "Delta": [
+            { "flight_no": "DL-301", "price": 380.00, "duration": "9h 00m" },
+            { "flight_no": "DL-405", "price": 420.00, "duration": "8h 15m" }
+        ],
+        "United": [
+            { "flight_no": "UA-501", "price": 395.00, "duration": "8h 45m" },
+            { "flight_no": "UA-610", "price": 360.00, "duration": "9h 30m" }
+        ]
+    },
+
+    "scenarios": {
+        "happy_path": {
+            "AirFrance": { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.10 },
+            "Delta":     { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.15 },
+            "United":    { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.12 }
+        },
+        "partial_failure": {
+            "AirFrance": { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.10 },
+            "Delta":     { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.15 },
+            "United":    { "fail": true,  "retryable": false, "fail_for_attempts": 0, "delay": 0.05 }
+        },
+        "all_fail": {
+            "AirFrance": { "fail": true, "retryable": false, "fail_for_attempts": 0, "delay": 0.05 },
+            "Delta":     { "fail": true, "retryable": false, "fail_for_attempts": 0, "delay": 0.05 },
+            "United":    { "fail": true, "retryable": false, "fail_for_attempts": 0, "delay": 0.05 }
+        },
+        "retry_then_succeed": {
+            "AirFrance": { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.10 },
+            "Delta":     { "fail": false, "retryable": true,  "fail_for_attempts": 2, "delay": 0.10 },
+            "United":    { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.12 }
+        },
+        "missing_info": {
+            "AirFrance": { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.10 },
+            "Delta":     { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.15 },
+            "United":    { "fail": false, "retryable": false, "fail_for_attempts": 0, "delay": 0.12 }
+        }
+    }
+}

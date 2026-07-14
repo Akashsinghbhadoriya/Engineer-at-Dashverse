@@ -1,177 +1,355 @@
-# Join Dashverse Research
+# Travel Planning Agent Orchestrator
 
-**Build the Future of Generative Content Creation**
+A multi-agent orchestration system for a Travel Planning Assistant, built with Python's `asyncio`. Processes natural-language travel requests through a chain of specialized agents, with parallel provider lookups and graceful error handling.
 
-Welcome to **Dashverse** — where we don't just use generative AI, we push it to its limits.
+---
 
-We are a small, fast-moving team building powerful tools for the next generation of storytellers. Our products — like [Frameo.ai](https://frameo.ai/create) and [Dashtoon Studio](https://studio.dashtoon.ai/) — enable creators to instantly turn ideas into high-quality videos, comics, and more using AI. If you're someone who thrives on solving deep technical problems and wants to see your work used by millions, this is your playground.
+## How to Run
 
-## Open Roles
+**Requirements:** Python 3.11+ (no external dependencies — stdlib only)
 
-We're hiring for multiple positions. Choose the problem statement that matches your expertise:
+```bash
+python3 main.py
+```
 
-### Research Engineer
+This runs five scenarios in sequence:
+1. Happy path — all 3 providers succeed
+2. Partial failure — one provider fails permanently
+3. All providers fail
+4. Transient failure — one provider fails twice, then succeeds on retry
+5. Missing info — vague query triggers clarification response
 
-This isn't your average research role.
+---
 
-At Dashverse, your work directly impacts creators. You'll get to see the delight on a user's face when a tool you've built helps them bring their imagination to life — in seconds, not hours. This is a rare opportunity to move fast and shape the future of generative media.
+## Agent Architecture
 
-You're not here to write papers and wait six months for reviews. You're here to:
-- Prototype bleeding-edge generative models.
-- Ship tools that change how stories are made.
-- Build the infra and internal tools to move 10x faster.
+### DAG (Directed Acyclic Graph)
 
-**Problem Statements:**
-- [Problem Statement 001: Who's That Character?](problem-statement-001-whos-that-character.md) - Build a scalable pipeline to extract structured metadata from character images
-- [Problem Statement 002: Make a Multimodal AI](problem-statement-002-make-a-multimodal-ai.md) - Generate stylized art and captions from a single seed
+```
+                    ┌─────────────────────────────────────────────┐
+  Phase 1           │  parser ──► validator                       │
+  (sequential)      └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+  Phase 2           │  provider_a  ──┐                            │
+  (PARALLEL)        │  provider_b  ──┼──► aggregator ──► formatter│
+                    │  provider_c  ──┘                            │
+  Phase 3           └─────────────────────────────────────────────┘
+  (sequential)
+```
 
-### Product Engineer - Agents
+### Agent Responsibilities
 
-Build intelligent agent systems that orchestrate complex workflows.
+| Agent | Node ID | Responsibility |
+|---|---|---|
+| `ParserAgent` | `parser` | Extracts structured fields (destination, origin, date, trip_type) from raw text using regex |
+| `ValidatorAgent` | `validator` | Checks all required fields are present; returns list of missing fields |
+| `ProviderAgent` × 3 | `provider_a/b/c` | Mocks an airline API call; returns the cheapest flight for that carrier |
+| `AggregatorAgent` | `aggregator` | Collects all successful provider results; selects the best price |
+| `FormatterAgent` | `formatter` | Builds the final user-facing string, or a clarification request if fields are missing |
 
-You'll design and implement multi-agent architectures that coordinate specialized AI agents to solve real-world problems. This role focuses on:
-- Designing agent orchestration systems with clean abstractions
-- Implementing parallel execution and distributed coordination
-- Building robust error handling and observability
-- Creating scalable architectures for agent collaboration
+---
 
-**Problem Statement:**
-- [Problem Statement 003: Agent Orchestrator](problem-statement-003-agent-orchestrator.md) - Build a conversational agent chain with parallel execution
+## Design Decisions & Trade-offs
 
-## What We're Solving
+### Why 7 nodes (5 agent types)?
 
-We’re building real tools for real creators — and that means diving deep into unsolved problems at the frontier of generative media.
+**Parser and Validator are separate agents.**
+Parsing (text → structure) and validation (completeness check) have different concerns. Merging them would mean the regex extraction and field-checking logic live together — harder to test and extend independently. The extra communication overhead (one dict passed between agents) is negligible.
 
-### Advancing Visual Quality with Diffusion
+**Three ProviderAgent instances, not one.**
+Each provider must run concurrently and independently. A single "multi-provider" agent would force sequential calls internally, defeating the purpose. Three separate nodes let the orchestrator fan them out in parallel natively.
 
-Diffusion models are powerful, but raw outputs often fall short. Whether it's a single comic panel or 120 frames of an AI-generated video, visual quality matters. We're focused on pushing fidelity, coherence, and artistic control to new heights.
+**Aggregator and Formatter are separate agents.**
+Aggregation (pick the best from N results) and formatting (render a human string) are distinct transformations. Keeping them separate means you can swap the formatter (e.g., for a different output format) without touching selection logic.
 
-**Prompt:** *"A 1950s All India Radio broadcaster reading news in Hindi at a wooden microphone, headphones on and script in hand under soft studio lights."*
+**Why not combine Parser + Validator?**
+The validator's `missing_fields` output is needed by the formatter directly (bypassing the provider results when info is missing). If merged, the formatter would need to reach into the combined agent's output with mixed concerns. Keeping them separate preserves the clean contract each downstream node expects.
 
-<table>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-files/6663a422-bd14-4e69-bae2-de1860bb3cfe.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-files/d4b62477-614a-40cc-972d-e9c7b2de6e7f.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td>Flux Dev</td>
-    <td>Dashtoon Model</td>
-  </tr>
-</table>
+### Which agents run in parallel, and why?
 
-### Controllability at the Core
+`provider_a`, `provider_b`, and `provider_c` run **in parallel**. They have no dependency on each other — each only needs the validator's output. Querying three airlines sequentially would cost ~(delay_A + delay_B + delay_C); in parallel it costs ~max(delay_A, delay_B, delay_C).
 
-We're developing **creative tools**, not black boxes. That means giving creators meaningful control over outputs:
-- Text + image multi-modal prompts.
-- Conditioning on pose, expression, scene layout, and panel structure.
-- Temporal control for frame-to-frame consistency in videos.
-- Spatial control for region-specific edits.
+Everything else is sequential: parser → validator must complete before providers can start (providers need validated structured data), and aggregator → formatter must run after providers (they consume provider results).
 
-<table>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/df97ec54-4db6-4e22-b743-ea365532b84f.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/58465a67-5712-4b3f-8abf-74019971d897.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/78bf153a-e23f-4ef9-9231-f3d9244121c4.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/91acfaec-b637-4266-9ca8-32f3c0c85216.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/1c7ee699-2482-4362-b2f5-5acf4dd27f2a.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/449e5924-2e86-43e0-b566-5618f7026363.png" width="512"/></td>
-  </tr>
-</table>
+### How parallel agent failures are handled
 
-### Character Identity & Reusability
+The `aggregator` node uses `join_policy="ANY"`:
 
-Characters aren't just faces — they're consistent, recognizable identities. We're building:
-- ID-consistent inpainting to fix or change parts of a character without losing fidelity.
-- Low-data personalization methods (e.g., style or identity adapters).
-- Seamless multi-angle rendering of the same character across scenes or panels.
+- **All terminal + ≥1 completed** → aggregator runs with whatever succeeded
+- **All terminal + 0 completed** → the scheduler marks aggregator as `SKIPPED` (and formatter as `SKIPPED` downstream)
 
-This enables creators to design once and reuse intelligently — with style and consistency.
+Inside `AggregatorAgent.execute`, the context is filtered to drop `None` entries (nodes that failed have no context entry), so the aggregator works naturally over 1, 2, or 3 results. If 0 results arrive, it returns an early response string instead of crashing.
 
+| Providers succeeding | Outcome |
+|---|---|
+| 3/3 | Best of all three |
+| 2/3 | Best of two; third silently excluded |
+| 1/3 | That one result returned |
+| 0/3 | Aggregator skipped → formatter skipped → `response: None` |
 
-<div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
-  <img src="https://content.dashtoon.ai/stability-images/792d76bf-11b5-44a6-81c7-b7a57b8428b2.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/b9c49616-8686-40c3-8261-17918dfd9b8e.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/4ed5168f-644b-460b-b912-5c596a9614d9.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/53d3c04e-f7cf-4a22-b3c8-aa8ca8393445.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/0b6bad0d-d3a3-43fb-b93d-b871c5c57710.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-</div>
+### Technology choice for parallel execution: `asyncio`
 
-### Scene-Aware Object & Clothing Transfer
+Python's `asyncio` cooperative concurrency was chosen over threads or `multiprocessing` because:
 
-We're building pipelines to enable asset-level swaps (outfits, props, etc.) while preserving visual integrity and scene coherence.
+- **No race conditions by design.** asyncio is single-threaded; only one coroutine runs at a time, and context switches happen only at `await` points. Shared state (the `context` dict, `node_states`) can be read/written without locks in most places — the check-and-set in `try_claim` is atomic because there's no interleaving between the check and the set.
+- **Low overhead.** The bottleneck is I/O latency (simulated with `asyncio.sleep`), not CPU. Threads would add OS-level overhead for no gain here.
+- **Timeout support.** `asyncio.wait_for` gives per-node timeouts cleanly without extra machinery.
 
-Key techniques include:
-- Semantic segmentation with feature-level transfer.
-- Training-free approaches using adapter stacking.
-- Support for both photoreal and stylized (anime, comic) domains.
+The only lock in the codebase (`Execution._state_lock`) is there defensively for future thread-safety if the execution model ever changes.
 
+### Immutable context via `MappingProxyType`
 
-<table>
-  <tr>
-    <td><strong>Base Image</strong></td>
-    <td><strong>Clothing Image</strong></td>
-    <td><strong>Final Image</strong></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/64e995b9-2215-41ff-bd67-55602fb43d0d.webp" width="300"/></td>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-images/08668b84-9882-47d8-920b-0accd5dc2261.webp" width="300"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/35933486-d611-434f-8d0f-6a493d97dd4b.webp" width="300"/></td>
-  </tr>
-</table>
+Each agent receives a `frozen_view` of the context — a `MappingProxyType` that raises `TypeError` on any write attempt. This enforces that agents are pure transformers: they read existing context and return a new `AgentResult`, never mutating shared state. The orchestrator is the sole writer (via `execution.context[node.id] = result.data`).
 
-### Training-Free Customization & Distillation
+### EventBus + scheduler decoupling
 
-We're exploring fast, lightweight personalization methods that don’t require full retraining:
-- Tuning-free ID adapters and style injectors.
-- LoRA + ControlNet workflows with zero additional training.
-- Fast model distillation for mobile inference and real-time generation.
+When a node finishes, it emits an event to the `EventBus`. Two subscribers handle it:
+1. **Trace handler** — appends to the execution trace
+2. **Scheduler handler** — inspects all downstream nodes and schedules any that are now ready
 
-These innovations unlock high-speed, high-fidelity use in production creator tools.
+This means the `Orchestrator` doesn't contain scheduling logic — it just fires entry nodes and awaits. Adding a new cross-cutting concern (e.g., metrics, alerting) is a new `bus.subscribe(...)` call, with zero changes to orchestrator or scheduler.
 
-If any of this sparks ideas, feel free to explore one of our sample problems — or fork the repo and show us what you’d build differently.
+### Retry logic
 
-## What You’ll Work On
+`RetryPolicy(max_attempts, backoff_seconds)` is configured per node. The scheduler retries with `backoff_seconds * attempt` sleep between tries. Provider nodes get `max_attempts=3` by default; parser/validator/aggregator/formatter get `max_attempts=1` (failures there are not transient).
 
-Here are a few recent open-source drops from our team:
-- [Keyframe LoRA: Video generation using only keyframes](https://insiders.dashtoon.com/introducing-hunyuan-keyframe-lora-open-source-keyframe-based-video-generation/)
-- [Tuning-free ID-consistent inpainting](https://insiders.dashtoon.com/a-road-towards-tuning-free-id-consistent-character-inpainting/)
-- [DashTailor: Object transfer for AI-generated comics](https://insiders.dashtoon.com/dashtailor-training-free-clothing-and-object-transfer-for-ai-comics/)
-- [Adversarial Diffusion Distillation](https://insiders.dashtoon.com/exploring-the-future-of-comic-generation-insights-from-our-adversarial-diffusion-distillation-poc/)
-- [DashAnimeXL: Stylized diffusion for comic-style animations](https://insiders.dashtoon.com/dashanimexl/)
+---
 
-## Who We’re Looking For
+## Assumptions
 
-We don’t care about your resume or degree. We care about what you’ve built, trained, or broken and fixed.
+- All external API calls are mocked via `mock_data.json`; no real HTTP requests are made
+- NLP parsing is regex-based (sufficient for the structured test inputs; not production NLP)
+- "Best" flight means lowest price across all successful providers
+- `trip_type` is one of: `vacation`, `business`, `holiday` — extracted by keyword match
+- Dates are expressed as `today`, `tomorrow`, or `YYYY-MM-DD` / `M/D/YYYY` patterns
+- Scenario behavior (delays, failure modes, retry counts) is fully declarative in `mock_data.json` — no code changes needed to simulate new failure patterns
 
-You might be a good fit if you:
-- Have trained or fine-tuned models like Stable Diffusion, AnimateDiff, or StyleGAN.
-- Are comfortable with PyTorch, LoRA, ControlNet, DreamBooth, or IP-Adapters.
-- Can manage multi-GPU training jobs, optimize inference, and debug issues fast.
-- Prefer to move quickly and own the entire stack from training to UI.
+---
 
-Bonus if you:
-- Have written clean infra or tooling that helped teams scale.
-- Have contributed to open-source or built an impressive side project.
-- Have a strong perspective on how generative models should evolve.
+## Example Output
 
-## Perks
+### Scenario 1: Happy Path (all providers succeed)
 
-- Dedicated compute access with high-end GPUs.
-- Fixed-band compensation based on submission quality.
-- End-to-end ownership: from research to production to user experience.
+```
+=======================================================
+SCENARIO : Happy Path  (mock: 'happy_path')
+Input    : Book me a flight from New York to Paris today for vacation
 
-## How to Apply
+  Execution Trace:
+    [COMPLETED ] parser      @ t+0.000s
+    [COMPLETED ] validator   @ t+0.000s
+    [COMPLETED ] provider_a  @ t+0.101s   ─┐
+    [COMPLETED ] provider_c  @ t+0.121s    ├── ran in parallel
+    [COMPLETED ] provider_b  @ t+0.151s   ─┘
+    [COMPLETED ] aggregator  @ t+0.151s
+    [COMPLETED ] formatter   @ t+0.151s
 
-- Clone this repo.
-- Complete the problem statement that matches your role (see above).
-- Email your submission to: **soumyadeep [at] dashverse.ai**
+  Response : Your best flight is with United at $360.0
+  Duration : 152ms
+```
 
-No Leetcode. No resume screening. Just real problems and real builders.
+Providers ran concurrently (A finished at ~100ms, C at ~120ms, B at ~150ms). Total wall time ≈ slowest provider (150ms), not sum (370ms).
 
-If you're the kind of person who wants to own the full stack — from fine-tuning to infra to user-facing tools — come build with us.
+---
 
-**Dashverse — Dream it. Generate it. Share it.**
+### Scenario 2: Partial Failure — United permanently down
+
+```
+=======================================================
+SCENARIO : Partial Failure (United down)  (mock: 'partial_failure')
+Input    : Book me a flight from New York to Paris today for vacation
+
+  Execution Trace:
+    [COMPLETED ] parser      @ t+0.000s
+    [COMPLETED ] validator   @ t+0.000s
+    [FAILED    ] provider_c  @ t+0.051s   ─┐
+    [COMPLETED ] provider_a  @ t+0.101s    ├── ran in parallel; United failed
+    [COMPLETED ] provider_b  @ t+0.151s   ─┘
+    [COMPLETED ] aggregator  @ t+0.151s       ← join_policy=ANY: continued with 2 results
+    [COMPLETED ] formatter   @ t+0.151s
+
+  Response : Your best flight is with Delta at $380.0
+  Duration : 152ms
+```
+
+`provider_c` (United) failed. The aggregator's `join_policy="ANY"` allowed the chain to continue. Best result from the two successful providers was returned.
+
+---
+
+### Scenario 3: All Providers Fail
+
+```
+=======================================================
+SCENARIO : All Providers Fail  (mock: 'all_fail')
+Input    : Book me a flight from New York to Paris today for vacation
+
+  Execution Trace:
+    [COMPLETED ] parser      @ t+0.000s
+    [COMPLETED ] validator   @ t+0.000s
+    [FAILED    ] provider_a  @ t+0.052s
+    [FAILED    ] provider_b  @ t+0.052s
+    [FAILED    ] provider_c  @ t+0.052s
+    [SKIPPED   ] aggregator  @ t+0.052s   ← all deps failed; skipped by scheduler
+    [SKIPPED   ] formatter   @ t+0.052s   ← propagated skip
+
+  Response : None
+  Duration : 52ms
+```
+
+All three providers failed. The scheduler detected 0 completed dependencies for aggregator and propagated a SKIPPED state down the chain. The system did not hang.
+
+---
+
+### Scenario 4: Transient Failure with Retry (Delta fails 2×, succeeds 3rd)
+
+```
+=======================================================
+SCENARIO : Retry Then Succeed (Delta transient)  (mock: 'retry_then_succeed')
+Input    : Book me a flight from New York to Paris today for vacation
+
+  Execution Trace:
+    [COMPLETED ] parser      @ t+0.000s
+    [COMPLETED ] validator   @ t+0.001s
+    [COMPLETED ] provider_a  @ t+0.101s   ─┐
+    [COMPLETED ] provider_c  @ t+0.121s    ├── AirFrance + United finished quickly
+    [COMPLETED ] provider_b  @ t+3.305s   ─┘  Delta retried twice (backoff: 1s, 2s)
+    [COMPLETED ] aggregator  @ t+3.305s
+    [COMPLETED ] formatter   @ t+3.305s
+
+  Response : Your best flight is with United at $360.0
+  Duration : 3306ms
+```
+
+Delta (provider_b) failed on attempts 1 and 2, then succeeded on attempt 3. `RetryPolicy(max_attempts=3, backoff_seconds=1.0)` handled this automatically. Other providers completed in parallel and waited at the aggregator.
+
+---
+
+### Scenario 5: Missing Information
+
+```
+=======================================================
+SCENARIO : Missing Info  (mock: 'happy_path')
+Input    : I want to travel somewhere
+
+  Execution Trace:
+    [COMPLETED ] parser      @ t+0.000s
+    [COMPLETED ] validator   @ t+0.000s
+    [COMPLETED ] provider_a  @ t+0.101s
+    [COMPLETED ] provider_c  @ t+0.121s
+    [COMPLETED ] provider_b  @ t+0.151s
+    [COMPLETED ] aggregator  @ t+0.151s
+    [COMPLETED ] formatter   @ t+0.151s
+
+  Response : I need a bit more information to find your flight.
+             Could you please provide: date, origin, trip_type?
+  Duration : 152ms
+```
+
+Validator marked `validated=False` with `missing_fields`. The formatter detected this and short-circuited to a clarification response, ignoring the (wasted) provider results.
+
+> **Design note:** An alternative would be to skip provider calls when validation fails. This could be achieved by adding a conditional node or changing the validator to return `status="failed"` — but that would require a `join_policy` change on providers or a new branch node. The current approach keeps the graph simple at the cost of unnecessary provider calls on bad input.
+
+---
+
+## Extensibility
+
+The orchestrator, scheduler, and execution engine are **completely domain-agnostic**. They operate on `WorkflowGraph` — a list of `Node` objects. Nothing in `orchestrator.py`, `scheduler.py`, or `execution.py` knows anything about travel, flights, or providers. Swapping domains means only changing `workflow.py` and writing new agents.
+
+### Different workflows from the same engine
+
+`build_travel_graph()` in `workflow.py` is just one possible graph. The same orchestrator could run:
+
+```python
+# E-commerce order pipeline
+WorkflowGraph([
+    Node(id="intent_parser",    dependencies=[],                    agent=IntentParserAgent()),
+    Node(id="inventory_check",  dependencies=["intent_parser"],     agent=InventoryAgent()),
+    Node(id="pricing_engine",   dependencies=["intent_parser"],     agent=PricingAgent()),
+    Node(id="fraud_check",      dependencies=["intent_parser"],     agent=FraudAgent()),
+    Node(id="checkout",         dependencies=["inventory_check",
+                                              "pricing_engine",
+                                              "fraud_check"],       agent=CheckoutAgent()),
+])
+
+# Content moderation pipeline
+WorkflowGraph([
+    Node(id="text_classifier",  dependencies=[],                    agent=TextClassifierAgent()),
+    Node(id="image_classifier", dependencies=[],                    agent=ImageClassifierAgent()),
+    Node(id="policy_checker",   dependencies=["text_classifier",
+                                              "image_classifier"],  agent=PolicyAgent()),
+    Node(id="action_router",    dependencies=["policy_checker"],    agent=ActionRouterAgent()),
+])
+```
+
+Any DAG — any number of nodes, any fan-out/fan-in shape — works without touching the core engine.
+
+### Dynamic workflow construction
+
+`workflow.py` can be replaced with a planner agent that builds the graph at runtime based on the request. For example:
+
+```python
+# A PlannerAgent could return a list of node specs:
+# "user wants flight + hotel" → build a graph with both provider sub-chains
+# "user wants flight only"    → build a leaner graph, skip hotel nodes
+
+async def build_dynamic_graph(user_input: str) -> WorkflowGraph:
+    plan = await PlannerAgent().execute(user_input)
+    nodes = []
+    for step in plan["steps"]:
+        nodes.append(Node(id=step["id"],
+                          dependencies=step["deps"],
+                          agent=AGENT_REGISTRY[step["agent_type"]](),
+                          retry_policy=RetryPolicy(**step.get("retry", {})),
+                          timeout=step.get("timeout", 5.0)))
+    return WorkflowGraph(nodes)
+```
+
+The orchestrator receives the graph and runs it — it doesn't care how the graph was built.
+
+### Expanding `RetryPolicy`
+
+`RetryPolicy` currently exposes `max_attempts` and `backoff_seconds`. It can be extended without changing the scheduler's core loop:
+
+| Field | What it enables |
+|---|---|
+| `strategy: "fixed" \| "exponential" \| "jitter"` | Different backoff curves |
+| `retry_on: list[type]` | Retry only on specific exception types |
+| `deadline_seconds: float` | Total time budget across all attempts (not per attempt) |
+| `on_retry: Callable` | Hook to log, alert, or mutate context before each retry |
+
+### Expanding `join_policy`
+
+`Node.join_policy` currently supports `"ALL"` (every dep must complete) and `"ANY"` (at least one dep must complete). Additional policies that fit naturally:
+
+| Policy | Semantics |
+|---|---|
+| `"MAJORITY"` | ≥ ⌈N/2⌉ deps must complete — useful for quorum-based decisions |
+| `"N_OF_M"` | Exactly N successes required out of M deps — configurable threshold |
+| `"FIRST"` | Start as soon as any dep completes, cancel the rest — racing pattern |
+| `"TIMEOUT_GATE"` | Wait up to T seconds, then proceed with whatever arrived |
+
+Each policy is a pure function of `node_states` — a new `elif` branch in `is_ready()` inside `scheduler.py` is the only change needed.
+
+---
+
+## File Structure
+
+```
+.
+├── main.py          # Entry point; defines and runs 5 test scenarios
+├── models.py        # Core data types: AgentResult, Node, WorkflowGraph, RetryPolicy
+├── orchestrator.py  # Kicks off entry nodes, wires EventBus, returns final result
+├── scheduler.py     # try_claim, run_node (with retry/timeout), scheduler_handler
+├── execution.py     # Shared execution state: context dict + node_states + frozen_view
+├── event_bus.py     # Pub/sub: emit(node, execution) calls all subscribers
+├── workflow.py      # build_travel_graph() — declarative graph definition
+├── mock_data.json   # Flight data + per-scenario behavior config
+└── agents/
+    ├── base.py      # Abstract Agent interface
+    ├── parser.py    # ParserAgent
+    ├── validator.py # ValidatorAgent
+    ├── provider.py  # ProviderAgent (instantiated 3× with different names)
+    ├── aggregator.py# AggregatorAgent
+    └── formatter.py # FormatterAgent
+```
