@@ -24,7 +24,17 @@ def try_claim(node, execution):
 
 async def run_node(node, execution, bus):
     view = execution.frozen_view(node.id)
+    start_time = time.time()
     attempt = 0
+
+    # Detect parallel: any other node currently RUNNING
+    parallel = any(
+        s == NodeState.RUNNING and nid != node.id
+        for nid, s in execution.node_states.items()
+    )
+
+    await bus.emit(node, execution, event="START", meta={"parallel": parallel})
+
     while True:
         try:
             result = await asyncio.wait_for(node.agent.execute(view), timeout=node.timeout)
@@ -41,9 +51,19 @@ async def run_node(node, execution, bus):
         if not can_retry:
             execution.node_states[node.id] = NodeState.FAILED
             break
+
+        await bus.emit(node, execution, event="RETRY", meta={"attempt": attempt})
         await asyncio.sleep(node.retry_policy.backoff_seconds * attempt)
 
-    await bus.emit(node, execution)  # exactly one emission per node, always
+    end_time = time.time()
+    execution.node_meta[node.id] = {
+        "start": start_time,
+        "end": end_time,
+        "attempts": attempt + 1,
+        "parallel": parallel,
+    }
+
+    await bus.emit(node, execution, event="END")  # exactly one END per node, always
 
 
 async def scheduler_handler(node, execution, graph, bus):
@@ -54,7 +74,7 @@ async def scheduler_handler(node, execution, graph, bus):
             continue  # still waiting on other deps
         if not satisfied:
             execution.node_states[downstream.id] = NodeState.SKIPPED
-            tasks.append(bus.emit(downstream, execution))  # propagate skip
+            tasks.append(bus.emit(downstream, execution, event="END"))  # propagate skip
             continue
         if try_claim(downstream, execution):
             tasks.append(asyncio.create_task(run_node(downstream, execution, bus)))

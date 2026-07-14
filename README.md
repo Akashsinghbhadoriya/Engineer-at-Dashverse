@@ -104,11 +104,14 @@ Each agent receives a `frozen_view` of the context — a `MappingProxyType` that
 
 ### EventBus + scheduler decoupling
 
-When a node finishes, it emits an event to the `EventBus`. Two subscribers handle it:
-1. **Trace handler** — appends to the execution trace
-2. **Scheduler handler** — inspects all downstream nodes and schedules any that are now ready
+The `EventBus` emits three typed events per node — `"START"`, `"RETRY"`, and `"END"` — each carrying an optional `meta` dict. Two subscribers react:
 
-This means the `Orchestrator` doesn't contain scheduling logic — it just fires entry nodes and awaits. Adding a new cross-cutting concern (e.g., metrics, alerting) is a new `bus.subscribe(...)` call, with zero changes to orchestrator or scheduler.
+1. **Trace handler** — reacts to all three events: prints live output (`▶ start`, `↺ retry`, `✓/✗/— end`) during the run, then records a full trace entry (duration, attempts, parallel flag) on `"END"`
+2. **Scheduler handler** — only acts on `"END"` to inspect downstream nodes and schedule any that are now ready
+
+Adding a new cross-cutting concern (metrics, alerting) is a new `bus.subscribe(...)` call with zero changes to orchestrator or scheduler.
+
+**Parallel detection:** At node start, the scheduler checks `node_states` for any other `RUNNING` node. If one exists, the node is tagged `parallel=True` in `execution.node_meta`. This flows into the live `[parallel]` tag and the final trace table's `Parallel` column.
 
 ### Retry logic
 
@@ -129,126 +132,239 @@ This means the `Orchestrator` doesn't contain scheduling logic — it just fires
 
 ## Example Output
 
-### Scenario 1: Happy Path (all providers succeed)
+Each scenario prints a **live execution stream** (nodes as they fire/finish) followed by the final result and a **summary trace table** (Node, Status, Duration, Attempts, Parallel).
+
+### Scenario 1: Happy Path — all 3 providers succeed
 
 ```
-=======================================================
-SCENARIO : Happy Path  (mock: 'happy_path')
-Input    : Book me a flight from New York to Paris today for vacation
+════════════════════════════════════════════════════════════════════════
+  TEST: Happy Path — All 3 Providers Succeed
+  Input: "Book a flight from new york to paris today for vacation"
+────────────────────────────────────────────────────────────────────────
+  Live execution:
 
-  Execution Trace:
-    [COMPLETED ] parser      @ t+0.000s
-    [COMPLETED ] validator   @ t+0.000s
-    [COMPLETED ] provider_a  @ t+0.101s   ─┐
-    [COMPLETED ] provider_c  @ t+0.121s    ├── ran in parallel
-    [COMPLETED ] provider_b  @ t+0.151s   ─┘
-    [COMPLETED ] aggregator  @ t+0.151s
-    [COMPLETED ] formatter   @ t+0.151s
+    ▶  Parser
+    ✓  Parser  0.2ms
+    ▶  Validator
+    ✓  Validator  0.0ms
+    ▶  ProviderA (AirFrance)  [parallel]
+    ▶  ProviderB (Delta)  [parallel]
+    ▶  ProviderC (United)  [parallel]
+    ✓  ProviderA (AirFrance)  101.2ms
+    ✓  ProviderC (United)  121.1ms
+    ✓  ProviderB (Delta)  151.1ms
+    ▶  Aggregator
+    ✓  Aggregator  0.0ms
+    ▶  Formatter
+    ✓  Formatter  0.0ms
 
-  Response : Your best flight is with United at $360.0
-  Duration : 152ms
+────────────────────────────────────────────────────────────────────────
+  RESULT:
+    Best option: United  $360  (9h 30m)
+    Other options:
+      • AirFrance  $450  (8h 30m)
+      • Delta  $380  (9h 00m)
+
+────────────────────────────────────────────────────────────────────────
+  EXECUTION TRACE
+────────────────────────────────────────────────────────────────────────
+  Node                       Status       Duration       Attempts       Parallel
+────────────────────────────────────────────────────────────────────────
+  Parser                     ✓  OK        0.2ms          1/1            No
+  Validator                  ✓  OK        0.0ms          1/1            No
+  ProviderA (AirFrance)      ✓  OK        101.2ms        1/3            Yes
+  ProviderC (United)         ✓  OK        121.1ms        1/3            Yes
+  ProviderB (Delta)          ✓  OK        151.1ms        1/3            Yes
+  Aggregator                 ✓  OK        0.0ms          1/1            No
+  Formatter                  ✓  OK        0.0ms          1/1            No
+────────────────────────────────────────────────────────────────────────
+  Total wall time: 151.6ms  |  3/3 providers responded
+────────────────────────────────────────────────────────────────────────
 ```
 
-Providers ran concurrently (A finished at ~100ms, C at ~120ms, B at ~150ms). Total wall time ≈ slowest provider (150ms), not sum (370ms).
+All three providers are tagged `[parallel]` in the live stream and `Parallel: Yes` in the table. Wall time ≈ slowest provider (~150ms), not the sum (~370ms). The formatter now lists all options with duration, not just the winner.
 
 ---
 
-### Scenario 2: Partial Failure — United permanently down
+### Scenario 2: Partial Failure — United fails permanently
 
 ```
-=======================================================
-SCENARIO : Partial Failure (United down)  (mock: 'partial_failure')
-Input    : Book me a flight from New York to Paris today for vacation
+════════════════════════════════════════════════════════════════════════
+  TEST: Partial Failure — United fails permanently
+  Input: "Book a flight from new york to paris today for vacation"
+────────────────────────────────────────────────────────────────────────
+  Live execution:
 
-  Execution Trace:
-    [COMPLETED ] parser      @ t+0.000s
-    [COMPLETED ] validator   @ t+0.000s
-    [FAILED    ] provider_c  @ t+0.051s   ─┐
-    [COMPLETED ] provider_a  @ t+0.101s    ├── ran in parallel; United failed
-    [COMPLETED ] provider_b  @ t+0.151s   ─┘
-    [COMPLETED ] aggregator  @ t+0.151s       ← join_policy=ANY: continued with 2 results
-    [COMPLETED ] formatter   @ t+0.151s
+    ▶  ProviderA (AirFrance)  [parallel]
+    ▶  ProviderB (Delta)  [parallel]
+    ▶  ProviderC (United)  [parallel]
+    ✗  ProviderC (United)  FAILED after 2 attempt(s)
+    ✓  ProviderA (AirFrance)  101.1ms
+    ✓  ProviderB (Delta)  151.1ms
+    ▶  Aggregator
+    ✓  Aggregator  0.0ms
 
-  Response : Your best flight is with Delta at $380.0
-  Duration : 152ms
+────────────────────────────────────────────────────────────────────────
+  RESULT:
+    Best option: Delta  $380  (9h 00m)
+    Other options:
+      • AirFrance  $450  (8h 30m)
+
+────────────────────────────────────────────────────────────────────────
+  EXECUTION TRACE
+────────────────────────────────────────────────────────────────────────
+  Node                       Status       Duration       Attempts       Parallel
+────────────────────────────────────────────────────────────────────────
+  ProviderC (United)         ✗  FAIL      51.1ms         2/3            Yes
+  ProviderA (AirFrance)      ✓  OK        101.1ms        1/3            Yes
+  ProviderB (Delta)          ✓  OK        151.1ms        1/3            Yes
+  Aggregator                 ✓  OK        0.0ms          1/1            No
+  Formatter                  ✓  OK        0.0ms          1/1            No
+────────────────────────────────────────────────────────────────────────
+  Total wall time: 151.8ms  |  2/3 providers responded
+────────────────────────────────────────────────────────────────────────
 ```
 
-`provider_c` (United) failed. The aggregator's `join_policy="ANY"` allowed the chain to continue. Best result from the two successful providers was returned.
+United exhausted its retry budget (`2/3` attempts shown) and failed. `join_policy="ANY"` let the aggregator continue with AirFrance + Delta. The trace footer reports `2/3 providers responded`.
 
 ---
 
 ### Scenario 3: All Providers Fail
 
 ```
-=======================================================
-SCENARIO : All Providers Fail  (mock: 'all_fail')
-Input    : Book me a flight from New York to Paris today for vacation
+════════════════════════════════════════════════════════════════════════
+  TEST: All Providers Fail
+  Input: "Book a flight from new york to paris today for vacation"
+────────────────────────────────────────────────────────────────────────
+  Live execution:
 
-  Execution Trace:
-    [COMPLETED ] parser      @ t+0.000s
-    [COMPLETED ] validator   @ t+0.000s
-    [FAILED    ] provider_a  @ t+0.052s
-    [FAILED    ] provider_b  @ t+0.052s
-    [FAILED    ] provider_c  @ t+0.052s
-    [SKIPPED   ] aggregator  @ t+0.052s   ← all deps failed; skipped by scheduler
-    [SKIPPED   ] formatter   @ t+0.052s   ← propagated skip
+    ▶  ProviderA (AirFrance)  [parallel]
+    ▶  ProviderB (Delta)  [parallel]
+    ▶  ProviderC (United)  [parallel]
+    ✗  ProviderA (AirFrance)  FAILED after 2 attempt(s)
+    ✗  ProviderB (Delta)  FAILED after 2 attempt(s)
+    ✗  ProviderC (United)  FAILED after 2 attempt(s)
+    —  Aggregator  SKIPPED
+    —  Formatter  SKIPPED
 
-  Response : None
-  Duration : 52ms
+────────────────────────────────────────────────────────────────────────
+  RESULT:
+    No response generated.
+
+────────────────────────────────────────────────────────────────────────
+  EXECUTION TRACE
+────────────────────────────────────────────────────────────────────────
+  Node                       Status       Duration       Attempts       Parallel
+────────────────────────────────────────────────────────────────────────
+  ProviderA (AirFrance)      ✗  FAIL      51.2ms         2/3            Yes
+  ProviderB (Delta)          ✗  FAIL      51.2ms         2/3            Yes
+  ProviderC (United)         ✗  FAIL      51.2ms         2/3            Yes
+  Aggregator                 —  SKIP      —              1/1            No
+  Formatter                  —  SKIP      —              1/1            No
+────────────────────────────────────────────────────────────────────────
+  Total wall time: 51.8ms  |  0/3 providers responded
+────────────────────────────────────────────────────────────────────────
 ```
 
-All three providers failed. The scheduler detected 0 completed dependencies for aggregator and propagated a SKIPPED state down the chain. The system did not hang.
+All providers failed. The scheduler propagated `SKIPPED` down to aggregator and formatter. The system did not hang — total time was just the provider delay (~50ms).
 
 ---
 
 ### Scenario 4: Transient Failure with Retry (Delta fails 2×, succeeds 3rd)
 
 ```
-=======================================================
-SCENARIO : Retry Then Succeed (Delta transient)  (mock: 'retry_then_succeed')
-Input    : Book me a flight from New York to Paris today for vacation
+════════════════════════════════════════════════════════════════════════
+  TEST: Retry Then Succeed — Delta transient failure
+  Input: "Book a flight from new york to paris today for vacation"
+────────────────────────────────────────────────────────────────────────
+  Live execution:
 
-  Execution Trace:
-    [COMPLETED ] parser      @ t+0.000s
-    [COMPLETED ] validator   @ t+0.001s
-    [COMPLETED ] provider_a  @ t+0.101s   ─┐
-    [COMPLETED ] provider_c  @ t+0.121s    ├── AirFrance + United finished quickly
-    [COMPLETED ] provider_b  @ t+3.305s   ─┘  Delta retried twice (backoff: 1s, 2s)
-    [COMPLETED ] aggregator  @ t+3.305s
-    [COMPLETED ] formatter   @ t+3.305s
+    ▶  ProviderA (AirFrance)  [parallel]
+    ▶  ProviderB (Delta)  [parallel]
+    ▶  ProviderC (United)  [parallel]
+    ✓  ProviderA (AirFrance)  101.1ms
+    ↺  ProviderB (Delta)  retrying (1/3)
+    ✓  ProviderC (United)  121.1ms
+    ↺  ProviderB (Delta)  retrying (2/3)
+    ✓  ProviderB (Delta)  3305.6ms
+    ▶  Aggregator
+    ✓  Aggregator  0.0ms
 
-  Response : Your best flight is with United at $360.0
-  Duration : 3306ms
+────────────────────────────────────────────────────────────────────────
+  RESULT:
+    Best option: United  $360  (9h 30m)
+    Other options:
+      • AirFrance  $450  (8h 30m)
+      • Delta  $380  (9h 00m)
+
+────────────────────────────────────────────────────────────────────────
+  EXECUTION TRACE
+────────────────────────────────────────────────────────────────────────
+  Node                       Status       Duration       Attempts       Parallel
+────────────────────────────────────────────────────────────────────────
+  ProviderA (AirFrance)      ✓  OK        101.1ms        1/3            Yes
+  ProviderC (United)         ✓  OK        121.1ms        1/3            Yes
+  ProviderB (Delta)          ✓  OK        3305.6ms       3/3            Yes
+  Aggregator                 ✓  OK        0.0ms          1/1            No
+  Formatter                  ✓  OK        0.0ms          1/1            No
+────────────────────────────────────────────────────────────────────────
+  Total wall time: 3306.2ms  |  3/3 providers responded
+────────────────────────────────────────────────────────────────────────
 ```
 
-Delta (provider_b) failed on attempts 1 and 2, then succeeded on attempt 3. `RetryPolicy(max_attempts=3, backoff_seconds=1.0)` handled this automatically. Other providers completed in parallel and waited at the aggregator.
+The live stream shows two `↺` retry events for Delta before it succeeds. The trace table shows `3/3` attempts used and `3305.6ms` total duration (includes backoff sleeps of 1s + 2s). AirFrance and United completed normally while Delta retried in the background.
 
 ---
 
-### Scenario 5: Missing Information
+### Scenario 5: Validation Failure — Missing fields
 
 ```
-=======================================================
-SCENARIO : Missing Info  (mock: 'happy_path')
-Input    : I want to travel somewhere
+════════════════════════════════════════════════════════════════════════
+  TEST: Validation Failure — Missing fields
+  Input: "I want to travel somewhere"
+────────────────────────────────────────────────────────────────────────
+  Live execution:
 
-  Execution Trace:
-    [COMPLETED ] parser      @ t+0.000s
-    [COMPLETED ] validator   @ t+0.000s
-    [COMPLETED ] provider_a  @ t+0.101s
-    [COMPLETED ] provider_c  @ t+0.121s
-    [COMPLETED ] provider_b  @ t+0.151s
-    [COMPLETED ] aggregator  @ t+0.151s
-    [COMPLETED ] formatter   @ t+0.151s
+    ▶  Parser
+    ✓  Parser  0.2ms
+    ▶  Validator
+    ✓  Validator  0.0ms
+    ▶  ProviderA (AirFrance)  [parallel]
+    ▶  ProviderB (Delta)  [parallel]
+    ▶  ProviderC (United)  [parallel]
+    ✓  ProviderA (AirFrance)  101.2ms
+    ✓  ProviderC (United)  121.1ms
+    ✓  ProviderB (Delta)  150.6ms
+    ▶  Aggregator
+    ✓  Aggregator  0.0ms
+    ▶  Formatter
+    ✓  Formatter  0.0ms
 
-  Response : I need a bit more information to find your flight.
-             Could you please provide: date, origin, trip_type?
-  Duration : 152ms
+────────────────────────────────────────────────────────────────────────
+  RESULT:
+    I need a bit more information to find your flight.
+    Could you please provide: date, origin, trip_type?
+
+────────────────────────────────────────────────────────────────────────
+  EXECUTION TRACE
+────────────────────────────────────────────────────────────────────────
+  Node                       Status       Duration       Attempts       Parallel
+────────────────────────────────────────────────────────────────────────
+  Parser                     ✓  OK        0.2ms          1/1            No
+  Validator                  ✓  OK        0.0ms          1/1            No
+  ProviderA (AirFrance)      ✓  OK        101.2ms        1/3            Yes
+  ProviderC (United)         ✓  OK        121.1ms        1/3            Yes
+  ProviderB (Delta)          ✓  OK        150.6ms        1/3            Yes
+  Aggregator                 ✓  OK        0.0ms          1/1            No
+  Formatter                  ✓  OK        0.0ms          1/1            No
+────────────────────────────────────────────────────────────────────────
+  Total wall time: 151.3ms  |  3/3 providers responded
+────────────────────────────────────────────────────────────────────────
 ```
 
-Validator marked `validated=False` with `missing_fields`. The formatter detected this and short-circuited to a clarification response, ignoring the (wasted) provider results.
+Validator set `missing_fields: ["date", "origin", "trip_type"]`. The formatter detected this and short-circuited to a clarification response, ignoring the provider results.
 
-> **Design note:** An alternative would be to skip provider calls when validation fails. This could be achieved by adding a conditional node or changing the validator to return `status="failed"` — but that would require a `join_policy` change on providers or a new branch node. The current approach keeps the graph simple at the cost of unnecessary provider calls on bad input.
+> **Design note:** Providers still run here even though validation failed. An alternative is to have the validator return `status="failed"` to skip providers entirely — but that requires a `join_policy` change or a branch node. The current design keeps the graph simple at the cost of unnecessary provider calls on bad input.
 
 ---
 
@@ -337,19 +453,19 @@ Each policy is a pure function of `node_states` — a new `elif` branch in `is_r
 
 ```
 .
-├── main.py          # Entry point; defines and runs 5 test scenarios
-├── models.py        # Core data types: AgentResult, Node, WorkflowGraph, RetryPolicy
-├── orchestrator.py  # Kicks off entry nodes, wires EventBus, returns final result
-├── scheduler.py     # try_claim, run_node (with retry/timeout), scheduler_handler
-├── execution.py     # Shared execution state: context dict + node_states + frozen_view
-├── event_bus.py     # Pub/sub: emit(node, execution) calls all subscribers
-├── workflow.py      # build_travel_graph() — declarative graph definition
-├── mock_data.json   # Flight data + per-scenario behavior config
+├── main.py          # Entry point; 5 test scenarios + live output + trace table printer
+├── models.py        # Core types: AgentResult, Node (with label), WorkflowGraph, RetryPolicy
+├── orchestrator.py  # Kicks off entry nodes, wires EventBus, live-prints START/RETRY/END events
+├── scheduler.py     # try_claim, run_node (retry/timeout/parallel detection), scheduler_handler
+├── execution.py     # Shared state: context dict, node_states, node_meta (timing/attempts), frozen_view
+├── event_bus.py     # Pub/sub: emit(node, execution, event, meta) — START | RETRY | END
+├── workflow.py      # build_travel_graph() — declarative DAG with human-readable labels
+├── mock_data.json   # Flight data + per-scenario behavior config (delays, fail modes, retry counts)
 └── agents/
     ├── base.py      # Abstract Agent interface
-    ├── parser.py    # ParserAgent
-    ├── validator.py # ValidatorAgent
-    ├── provider.py  # ProviderAgent (instantiated 3× with different names)
-    ├── aggregator.py# AggregatorAgent
-    └── formatter.py # FormatterAgent
+    ├── parser.py    # ParserAgent — regex NLP → structured fields
+    ├── validator.py # ValidatorAgent — required field completeness check
+    ├── provider.py  # ProviderAgent — mock airline API (instantiated 3× with different names)
+    ├── aggregator.py# AggregatorAgent — picks best price from successful providers
+    └── formatter.py # FormatterAgent — renders full option list or clarification request
 ```

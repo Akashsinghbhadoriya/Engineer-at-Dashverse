@@ -8,7 +8,7 @@ class Execution:
         self.graph = graph
         self.context = context
         self.node_states = nodestate
-        self.node_metadata = {}
+        self.node_meta = {}   # {node.id: {start, end, attempts, parallel}}
         self._state_lock = asyncio.Lock()
 
     def frozen_view(self, node_id):

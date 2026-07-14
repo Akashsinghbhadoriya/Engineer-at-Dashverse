@@ -31,6 +31,7 @@ class Node:
     timeout: int
     agent: Callable
     join_policy: Literal["ALL", "ANY"] = "ALL"
+    label: str = ""
 
 class WorkflowGraph:
 
